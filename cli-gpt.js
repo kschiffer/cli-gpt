@@ -26,8 +26,10 @@ const argv = yargs(hideBin(process.argv))
   .argv;
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const GPT_APPEND_PROMPT = process.env.GPT_APPEND_PROMPT || '';
 let contents = '';
 let originalFile = '';
+let systemMessage = 'You are a helpful assistant.';
 
 const readFiles = async (filenames) => {
   if (filenames.length === 1) {
@@ -52,6 +54,8 @@ const readStdin = async () => {
 
 const executePrompt = async (payload) => {
   if (argv.debug) {
+    console.log(process.env);
+    console.log(argv);
     console.log(payload);
   }
 
@@ -81,12 +85,16 @@ const main = async () => {
     await readFiles(argv.filenames);
   }
 
-  if (argv.i === 'true') {
+  if (argv.i) {
     await readStdin();
   }
 
   if (contents && argv.c) {
+    systemMessage += ' Reply with the code ONLY and DO NOT provide any context or instructions.';
     contents = `\`\`\`\n${contents}\n\`\`\``;
+  }
+  if (argv.e) {
+    systemMessage += ' Reply ONLY with the MacOS terminal command to be executed. Do NOT add any context or explanations.';
   }
 
   let prompt = argv.p || '';
@@ -96,9 +104,12 @@ const main = async () => {
       prompt += '\n\n```';
     }
   }
+  if (GPT_APPEND_PROMPT) {
+    prompt = `${prompt}\n\n${GPT_APPEND_PROMPT}`;
+  }
 
   const messages = [
-    { role: 'system', content: 'You are a helpful assistant. For coding questions that ask you to modify/refactor code, reply with the code only and DO NOT provide any context or instructions.' },
+    { role: 'system', content: systemMessage },
     { role: 'user', content: prompt }
   ];
 
@@ -119,7 +130,7 @@ const main = async () => {
   const result = await executePrompt(payload);
 
 
-  if (argv.m === 'true') {
+  if (argv.m !== 'false') {
     // Open the modification in vim so the user can review and save it
     const originalFileEnding = originalFile.split('.').pop();
     const tempFile = `/tmp/${originalFileEnding ? `temp.${originalFileEnding}` : 'temp'}`;
@@ -139,13 +150,15 @@ const main = async () => {
       fs.writeFileSync(originalFile, fs.readFileSync(tempFile, 'utf8'));
       console.log(`Saved to ${originalFile}`);
     });
-  } else if (argv.e === 'true') {
-    const escapedResult = result.replace(/'/g, "'\\''");
+  } else if (argv.e) {
+    const escapedResult = result.replace(/'/g, "'\\''").replace(/```(.+)?/g, '').trim();
     exec(`echo '${escapedResult}' | pbcopy`, (error, stdout, stderr) => {
       if (error) {
         console.error(`Error copying to clipboard: ${error.message}`);
         return;
       }
+      console.log(escapedResult);
+      console.log('---');
       console.log('Copied to clipboard');
     });
   } else {
