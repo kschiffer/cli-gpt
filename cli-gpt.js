@@ -14,22 +14,23 @@ const argv = yargs(hideBin(process.argv))
   .option('c', { type: 'boolean', describe: 'Whether input/files are code and should be prepared as such' })
   .option('e', { type: 'boolean', describe: 'Whether the prompt result should be an executable command' })
   .option('m', { type: 'boolean', describe: 'Whether to modify the original file', default: 'false' })
-  .option('model', { type: 'string', describe: 'The model to use for completion', default: 'gpt-4o' })
-  .option('max_tokens', { type: 'number', describe: 'The maximum number of tokens to generate', default: 1000 })
+  .option('l', { type: 'boolean', describe: 'Whether to use the local API', default: 'false' })
+  .option('model', { type: 'string', describe: 'The model to use for completion', default: 'auto' })
+  .option('max_tokens', { type: 'number', describe: 'The maximum number of tokens to generate', default: 64_000 })
   .option('temperature', { type: 'number', describe: 'The temperature to use for sampling', default: 0.7 })
   .option('top_p', { type: 'number', describe: 'The proportion of the mass to consider', default: 0.9 })
-  .option('n', { type: 'number', describe: 'The number of completions to generate', default: 1 })
-  .option('stream', { type: 'boolean', describe: 'Whether to stream completions', default: false })
-  .option('logprobs', { type: 'number', describe: 'The log probabilities of the previous tokens', default: null })
   .option('stop', { type: 'string', describe: 'The token at which to stop generating', default: null })
   .option('debug', { type: 'boolean', describe: 'Whether to prepend the composed prompt to the output', default: false })
   .argv;
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const GPT_APPEND_PROMPT = process.env.GPT_APPEND_PROMPT || '';
+const LOCAL_API_HOST = process.env.LOCAL_API_HOST || 'http://localhost:1234/v1';
+const ANTHROPIC_API_HOST = process.env.ANTHROPIC_API_HOST || 'https://api.anthropic.com/v1';
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const PROMPT_APPEND = process.env.PROMPT_APPEND || '';
 let contents = '';
 let originalFile = '';
 let systemMessage = 'You are a helpful assistant.';
+const HOST = argv.l == true ? LOCAL_API_HOST : ANTHROPIC_API_HOST;
 
 const readFiles = async (filenames) => {
   if (filenames.length === 1) {
@@ -61,14 +62,19 @@ const executePrompt = async (payload) => {
 
   const headers = {
     'Content-Type': 'application/json',
-    'Authorization': `Bearer ${OPENAI_API_KEY}`
+    'x-api-key': ANTHROPIC_API_KEY,
+    'anthropic-version': '2023-06-01'
   };
 
   try {
-    const response = await axios.post('https://api.openai.com/v1/chat/completions', payload, { headers });
+    const response = await axios.post(`${HOST}/messages`, payload, { headers });
     const responseData = response.data;
-    const completions = responseData.choices.map(choice => choice.message.content);
-    let content = completions[0];
+    let content = responseData.content.reduce((acc, item) => {
+      if (item.type === 'text') {
+        return acc + item.text;
+      }
+      return acc;
+    }, '');
 
     if (argv.c && content.startsWith('```')) {
       content = content.split('\n').slice(1, -1).join('\n');
@@ -76,6 +82,7 @@ const executePrompt = async (payload) => {
 
     return content.trim();
   } catch (error) {
+    console.error(error);
     return error.response ? error.response.data : error.message;
   }
 };
@@ -89,9 +96,11 @@ const main = async () => {
     await readStdin();
   }
 
-  if (contents && argv.c) {
-    systemMessage += ' Reply with the code ONLY and DO NOT provide any context or instructions.';
-    contents = `\`\`\`\n${contents}\n\`\`\``;
+  if (argv.c) {
+    systemMessage += ' Reply with the code ONLY and DO NOT provide any context, explanations or instructions and keep the same formatting and coding style.';
+    if (contents) {
+      contents = `\`\`\`\n${contents}\n\`\`\``;
+    }
   }
   if (argv.e) {
     systemMessage += ' Reply ONLY with the MacOS terminal command to be executed. Do NOT add any context or explanations.';
@@ -104,31 +113,51 @@ const main = async () => {
       prompt += '\n\n```';
     }
   }
-  if (GPT_APPEND_PROMPT) {
-    prompt = `${prompt}\n\n${GPT_APPEND_PROMPT}`;
+  if (PROMPT_APPEND) {
+    prompt = `${prompt}\n\n${PROMPT_APPEND}`;
   }
 
   const messages = [
-    { role: 'system', content: systemMessage },
     { role: 'user', content: prompt }
   ];
 
+  let model = argv.model;
+  if (model === 'auto') {
+    if (argv.l == true) {
+      try {
+        // Fetch models for local API
+        const modelsResponse = await axios.get(`${HOST}/models`, {
+          headers: {
+            'x-api-key': ANTHROPIC_API_KEY,
+            'anthropic-version': '2023-06-01'
+          }
+        });
+        const models = modelsResponse.data.data.map(model => model.id);
+        model = models[0] || 'claude-3-sonnet-20240229';
+      } catch (error) {
+        console.warn('Could not fetch models, using default model');
+        model = 'claude-3-sonnet-20240229';
+      }
+    } else {
+      model = 'claude-3-7-sonnet-20250219'; // Using the latest Claude model as default
+    }
+  }
+
   const payload = {
+    model,
     messages,
-    model: argv.model,
+    system: systemMessage,
     max_tokens: argv.max_tokens,
     temperature: argv.temperature,
     top_p: argv.top_p,
-    n: argv.n,
-    stop: argv.stop ? argv.stop.replace('\\n', '\n') : null
+    stop_sequences: argv.stop ? [argv.stop.replace('\\n', '\n')] : []
   };
 
-  if (argv.m === 'true') {
+  if (argv.m == true) {
     console.log(`Interactively modifying ${originalFile}...`);
   }
 
   const result = await executePrompt(payload);
-
 
   if (argv.m !== 'false') {
     // Open the modification in vim so the user can review and save it
@@ -164,8 +193,6 @@ const main = async () => {
   } else {
     console.log(result);
   }
-
 };
 
 main();
-
